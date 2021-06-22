@@ -27,6 +27,7 @@ from .quantization_patterns import (
 from ._equalize import update_obs_for_equalization, convert_eq_obs
 from .utils import (
     is_get_tensor_info_node,
+    maybe_get_weight_observer_nodes,
     node_return_type_is_int,
     quantize_node,
     get_new_attr_name_with_prefix,
@@ -62,16 +63,13 @@ def run_weight_observers(observed: GraphModule) -> None:
     '''
     for node in observed.graph.nodes:
         if node.op == 'call_function' and node.target in WEIGHT_INDEX_DICT:
-            for i, node_arg in enumerate(node.args):
-                if i in WEIGHT_INDEX_DICT[node.target]:
-                    # node_arg is weight
-                    weight_observer_nodes = collect_producer_nodes(node_arg)
-                    if weight_observer_nodes is not None:
-                        weight_observer_module = \
-                            graph_module_from_producer_nodes(
-                                observed, weight_observer_nodes)
-                        # run the weight observer
-                        weight_observer_module()
+            weight_observer_nodes = maybe_get_weight_observer_nodes(node)
+            if weight_observer_nodes is not None:
+                weight_observer_module = \
+                    graph_module_from_producer_nodes(
+                        observed, weight_observer_nodes)
+                # run the weight observer
+                weight_observer_module()
 
 def fold_weight(
         quantized: QuantizedGraphModule,
@@ -156,9 +154,6 @@ def convert(model: GraphModule, is_reference: bool = False,
         convert_custom_config_dict = {}
     patterns, node_name_to_scope, prepare_custom_config_dict = restore_state(model)
     qconfig_map: Dict[str, QConfigAny] = model._qconfig_map  # type: ignore[assignment]
-    # always run weight observers in the top level forward method
-    # for dynamic quant ops or weight only quant ops
-    run_weight_observers(model)
 
     # move to cpu since we only have quantized cpu kernels
     model.eval().cpu()
@@ -187,6 +182,10 @@ def convert(model: GraphModule, is_reference: bool = False,
         # inputs, and scale the weight
         weight_eq_obs_dict = update_obs_for_equalization(model, modules)
         convert_eq_obs(model, modules, weight_eq_obs_dict)
+
+    # always run weight observers in the top level forward method
+    # for dynamic quant ops or weight only quant ops
+    run_weight_observers(model)
 
     quantized_graph = Graph()
     env: Dict[str, Dict[Optional[torch.dtype], Node]] = defaultdict(lambda: defaultdict(Node))  # type: ignore[arg-type]
